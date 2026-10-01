@@ -1,0 +1,89 @@
+# Production-like local stack (Phase 6.0.2).
+# Usage:
+#   docker compose up -d postgres redis
+#   docker compose up web worker beat
+# See docs/PRODUCTION_RUNBOOK.md for smoke tests.
+#
+# Defaults are for local verification with mock providers only.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: digitalid
+    ports:
+      - "5432:5432"
+    volumes:
+      - digitalid_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d digitalid"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build: .
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+    environment: &app_env
+      DJANGO_SECRET_KEY: docker-compose-local-dev-key-not-for-production-use-48
+      DJANGO_DEBUG: "true"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,web
+      DJANGO_ENV: development
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/digitalid
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      PUBLIC_APP_URL: http://localhost:3000
+      WHATSAPP_ENABLED: "false"
+      WHATSAPP_PROVIDER: mock
+      WHATSAPP_BUSINESS_PROVIDER: mock
+      GOOGLE_BUSINESS_PROVIDER: mock
+      GOOGLE_BUSINESS_ENABLED: "false"
+      RAZORPAY_PROVIDER: mock
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: celery -A config worker --loglevel=INFO --concurrency=2
+    environment:
+      <<: *app_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build: .
+    command: celery -A config beat --loglevel=INFO
+    environment:
+      <<: *app_env
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+
+volumes:
+  digitalid_pgdata:

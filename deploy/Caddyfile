@@ -1,0 +1,40 @@
+# Caddyfile for OPTIONAL compose profile "standalone-edge" only.
+#
+# On a Hostinger VPS that already runs WebGuardSphere (or any other app on
+# :80/:443), DO NOT enable standalone-edge. Use the host Caddy instead:
+#   deploy/caddy.host-snippet.caddyfile
+#
+# SITE_ADDRESS examples (.env.production):
+#   :80
+#   book.example.com
+
+{$SITE_ADDRESS} {
+	encode gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	handle /api* {
+		reverse_proxy web:8000
+	}
+
+	handle /health* {
+		reverse_proxy web:8000
+	}
+
+	handle /admin* {
+		reverse_proxy web:8000
+	}
+
+	handle /static* {
+		reverse_proxy web:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

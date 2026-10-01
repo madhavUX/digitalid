@@ -1,0 +1,73 @@
+# MANUAL snippet for the HOST Caddy that already serves WebGuardSphere
+# (https://webguardsphere.com/).
+#
+# Do NOT replace the existing WebGuardSphere site block.
+# Append a NEW site block for BookAnything only.
+#
+# Prerequisites (BookAnything compose default mode):
+#   bookanything-web      → 127.0.0.1:18080
+#   bookanything-frontend → 127.0.0.1:13000
+#
+# Replace book.example.com with the real BookAnything hostname.
+# After editing host Caddy config: caddy reload  (or systemctl reload caddy)
+#
+# book.example.com {
+# 	encode gzip
+#
+# 	header {
+# 		X-Content-Type-Options nosniff
+# 		Referrer-Policy same-origin
+# 		X-Frame-Options DENY
+# 		-Server
+# 	}
+#
+# 	handle /api* {
+# 		reverse_proxy 127.0.0.1:18080
+# 	}
+#
+# 	handle /health* {
+# 		reverse_proxy 127.0.0.1:18080
+# 	}
+#
+# 	handle /admin* {
+# 		reverse_proxy 127.0.0.1:18080
+# 	}
+#
+# 	handle {
+# 		reverse_proxy 127.0.0.1:13000
+# 	}
+# }
+
+book.example.com {
+	encode gzip
+
+	# Caddy obtains/renews HTTPS certificates for this hostname automatically
+	# when DNS points here. Do not add a webguardsphere.com block here.
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	handle /api* {
+		reverse_proxy 127.0.0.1:18080
+	}
+
+	handle /health* {
+		reverse_proxy 127.0.0.1:18080
+	}
+
+	handle /admin* {
+		reverse_proxy 127.0.0.1:18080
+	}
+
+	handle /static* {
+		reverse_proxy 127.0.0.1:18080
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:13000
+	}
+}

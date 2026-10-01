@@ -1,0 +1,294 @@
+# Production stack for BookAnything on a shared Hostinger VPS (1 vCPU / ~4 GB).
+#
+# ISOLATION: Docker Compose project name is "bookanything".
+# Do NOT interfere with WebGuardSphere (Nginx :80/:443, MySQL :3306,
+# host Redis :6379, Laravel API :8000).
+#
+# Default mode (shared VPS — Nginx owns the edge):
+#   - Does NOT publish host ports 80/443
+#   - Publishes Django/Next only on 127.0.0.1 loopback for host Nginx
+#   - See deploy/nginx.host-snippet.conf (preferred) or deploy/caddy.host-snippet.caddyfile
+#
+# Optional standalone edge (ONLY if nothing else owns 80/443):
+#   docker compose ... --profile standalone-edge up -d
+#
+# Low-resource profile (MVP / shared server):
+#   - Gunicorn workers = 1
+#   - Celery concurrency = 1, pool = solo
+#   - Conservative Postgres/Redis memory settings
+#   - No hard Docker mem_limit (avoids OOM-killing Postgres/Django under load)
+#
+# Usage:
+#   cp .env.production.example .env.production   # edit secrets on VPS only
+#   ./deploy.sh
+#
+# DATABASE_URL host must be pg.digitalid.internal (digitalid.E010).
+# Do NOT point BookAnything at host Redis 127.0.0.1:6379.
+
+name: bookanything
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bookanything-postgres
+    restart: unless-stopped
+    # Conservative shared-VPS planner/runtime settings (not aggressive tuning).
+    # shared_buffers kept small so WebGuardSphere MySQL/PHP retain headroom.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - max_connections=40
+      - -c
+      - wal_buffers=4MB
+      - -c
+      - checkpoint_completion_target=0.9
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      internal:
+        aliases:
+          - pg.digitalid.internal
+    # Never publish 5432 on the host.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    container_name: bookanything-redis
+    restart: unless-stopped
+    # Isolated from host Redis (127.0.0.1:6379 used by WebGuardSphere).
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${BOOKANYTHING_REDIS_MAXMEMORY:-96mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    # Never publish 6379 on the host.
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging: *default-logging
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bookanything-web:latest
+    container_name: bookanything-web
+    restart: unless-stopped
+    # 1 vCPU profile: exactly one sync worker (no multi-worker fan-out).
+    command: >
+      gunicorn config.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers ${GUNICORN_WORKERS:-1}
+      --threads ${GUNICORN_THREADS:-2}
+      --timeout ${GUNICORN_TIMEOUT:-60}
+      --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30}
+      --keep-alive ${GUNICORN_KEEPALIVE:-5}
+      --max-requests ${GUNICORN_MAX_REQUESTS:-500}
+      --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50}
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pg.digitalid.internal:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    # Loopback only — host Nginx proxies here. Avoids clash with WG API :8000.
+    ports:
+      - "127.0.0.1:${BOOKANYTHING_WEB_HOST_PORT:-18080}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live/', timeout=3)\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    logging: *default-logging
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bookanything-web:latest
+    container_name: bookanything-worker
+    restart: unless-stopped
+    # solo pool + concurrency 1: no prefork child multiplication on 1 vCPU.
+    command: >
+      celery -A config worker
+      --loglevel=INFO
+      --pool=${CELERY_POOL:-solo}
+      --concurrency=${CELERY_CONCURRENCY:-1}
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pg.digitalid.internal:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks:
+      - internal
+    logging: *default-logging
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bookanything-web:latest
+    container_name: bookanything-beat
+    restart: unless-stopped
+    command: celery -A config beat --loglevel=INFO
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pg.digitalid.internal:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    networks:
+      - internal
+    # Exactly one Beat replica — never scale this service.
+    logging: *default-logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        DJANGO_API_URL: http://web:8000
+        NEXT_PUBLIC_API_BASE_URL: /backend
+        BOOKANYTHING_SITE_DOMAIN: ${BOOKANYTHING_SITE_DOMAIN:-bookanything.in}
+    image: bookanything-frontend:latest
+    container_name: bookanything-frontend
+    restart: unless-stopped
+    environment:
+      DJANGO_API_URL: http://web:8000
+      NEXT_PUBLIC_API_BASE_URL: /backend
+      BOOKANYTHING_SITE_DOMAIN: ${BOOKANYTHING_SITE_DOMAIN:-bookanything.in}
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+      NODE_OPTIONS: ${BOOKANYTHING_NODE_OPTIONS:---max-old-space-size=384}
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      - internal
+    # Loopback only — host Nginx proxies here.
+    ports:
+      - "127.0.0.1:${BOOKANYTHING_FRONTEND_HOST_PORT:-13000}:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    logging: *default-logging
+
+  # OPTIONAL: only when this VPS has no other process on 80/443.
+  # On Hostinger with WebGuardSphere Nginx, leave this profile OFF.
+  caddy:
+    profiles: ["standalone-edge"]
+    image: caddy:2-alpine
+    container_name: bookanything-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    networks:
+      - internal
+    logging: *default-logging
+
+networks:
+  internal:
+    name: bookanything_internal
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: bookanything_postgres_data
+  redis_data:
+    name: bookanything_redis_data
+  caddy_data:
+    name: bookanything_caddy_data
+  caddy_config:
+    name: bookanything_caddy_config

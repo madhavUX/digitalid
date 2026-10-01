@@ -1,0 +1,61 @@
+from django.urls import path
+
+from messaging.views import (
+    WhatsAppConnectView,
+    WhatsAppDisconnectView,
+    WhatsAppInboundListView,
+    WhatsAppMessageListView,
+    WhatsAppStatusView,
+    WhatsAppTemplateDetailView,
+    WhatsAppTemplateListCreateView,
+    WhatsAppTemplateSubmitView,
+    WhatsAppTemplateSyncView,
+)
+
+urlpatterns = [
+    path(
+        "businesses/<uuid:business_id>/whatsapp/",
+        WhatsAppStatusView.as_view(),
+        name="business-whatsapp",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/connect/",
+        WhatsAppConnectView.as_view(),
+        name="business-whatsapp-connect",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/disconnect/",
+        WhatsAppDisconnectView.as_view(),
+        name="business-whatsapp-disconnect",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/templates/",
+        WhatsAppTemplateListCreateView.as_view(),
+        name="business-whatsapp-templates",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/templates/sync/",
+        WhatsAppTemplateSyncView.as_view(),
+        name="business-whatsapp-templates-sync",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/templates/<uuid:template_id>/",
+        WhatsAppTemplateDetailView.as_view(),
+        name="business-whatsapp-template-detail",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/templates/<uuid:template_id>/submit/",
+        WhatsAppTemplateSubmitView.as_view(),
+        name="business-whatsapp-template-submit",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/messages/",
+        WhatsAppMessageListView.as_view(),
+        name="business-whatsapp-messages",
+    ),
+    path(
+        "businesses/<uuid:business_id>/whatsapp/inbound/",
+        WhatsAppInboundListView.as_view(),
+        name="business-whatsapp-inbound",
+    ),
+]
